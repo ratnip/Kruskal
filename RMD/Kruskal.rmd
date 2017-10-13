@@ -1,0 +1,260 @@
+---
+title: "Kruskal"
+author: "Damir Pintar"
+date: "October 12, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(igraph)
+library(arules)
+library(optrees)
+library(ggplot2)
+library(ggraph)
+library(stringr)
+library(gridExtra)
+
+
+# change the working directory according to your custom file structure
+setwd("~/R/Kruskal/RMD")
+source("../R/helperFunctions.R")
+```
+
+## Input dataset loading and pre-processing
+
+We will use two datasets - a toy dataset to showcase the functions and methodology, and a real-life education dataset for actual analysis.
+
+```{r dfs_init}
+toy.df <-data.frame( A = c(T, T, T, F, F, F, T, T, T, T, F, F),
+                     B = c(T, T, T, F, F, F, F, T, T, T, F, F),
+                     C = c(F, F, F, T, T, T, F, T, F, T, F, F),
+                     D = c(F, F, F, T, T, T, F, F, F, T, F, F),
+                     E = c(F, F, F, F, F, F, T, T, T, T, F, F),
+                     F = c(T, F, F, F, F, F, F, F, F, F, T, T))
+
+edu.df <- read.csv("../datasets/MI2012.csv")
+edu.df <- edu.df[, -which(sapply(edu.df, sum)==0)]
+edu.df <- lapply(edu.df, as.logical) 
+edu.df <- as.data.frame(edu.df)
+
+edu2.df <- read.csv("../datasets/MI2010.csv")
+edu2.df <- edu2.df[, -length(edu2.df)] # removing 'fake_class', a remnant from Orange
+#edu2.df <- edu2.df[, -which(sapply(edu2.df, sum)==0)]
+edu2.df <- lapply(edu2.df, as.logical) 
+edu2.df <- as.data.frame(edu2.df)
+
+
+edu3.df <- edu2.df[, grep("Q", names(edu2.df))]
+edu3.df <- lapply(edu3.df, as.logical) 
+edu3.df <- as.data.frame(edu3.df)
+
+comp.df <- read.csv("../datasets/Computer_shop.csv")
+comp.df <- comp.df[, -ncol(comp.df)]  #redundant column
+comp.df <- lapply(comp.df, as.logical) 
+comp.df <- as.data.frame(comp.df)
+```
+
+
+Choose the input dataset and support here:
+
+```{r choose}
+df <- edu.df
+support <- 0.50
+encodeNames <- T
+```
+
+
+## Input dataset loading and pre-processing
+
+Let’s encode the dataset (and keep the info about the encoding in a separate data frame).
+
+```{r dfColEnc}
+dfColEncodings <- data.frame(names = names(df), code = names(df))
+if (encodeNames) {
+  dfColEncodings <- alphaColNames(names(df))
+  names(df) <- dfColEncodings$code
+}
+```
+
+
+
+## Apriori
+
+We will mine the frequent itemsets using the *eclat* algorithm and check out the summary of the results.
+
+```{r miningItemsets}
+# we are closed mining frequent itemsets using the eclat algorithm
+itemsets <- eclat(df, parameter = list(supp = support,
+                                               target = "closed frequent itemsets"))
+
+
+# we will mine frequent itemsets too to get the singletons
+# in order to have them in the final graph
+# (if they are not closed,  they would not appear in the CFI mining process)
+itemsetsTEMP <- eclat(df, parameter = list(supp = support,
+                                               target = "frequent itemsets"))
+
+# now we keep just the singleton itemsets
+quality(itemsetsTEMP)$noItems <- sapply(as(items(itemsetsTEMP), "list"), length)
+singletonsInd <- quality(itemsetsTEMP)$noItems == 1
+
+# and put them in the original dataset
+itemsets <- union(itemsets, itemsetsTEMP[singletonsInd,])
+
+# possible alternative: apriori (eclat is faster!)
+# itemsets2 <- apriori(df, parameter = list(supp = 1/12,
+#                                              target = "frequent itemsets"))
+
+#summary of results
+summary(itemsets)
+```
+
+```{r dfConv}
+res <- DATAFRAME(itemsets)
+res
+```
+
+Few other methods we can do with the itemset:
+
+```{r dfConv2}
+# convert the results to a list
+res.list <- as(items(itemsets), "list")
+
+# check out the default visualization
+image(items(itemsets))
+```
+
+
+We can add more quality measures to mined itemsets:
+
+```{r addingQualities}
+# adding the size of the itemset as a parameter
+quality(itemsets)$noItems <- sapply(res.list, length)
+quality(itemsets)$absSup <- round(quality(itemsets)$support * nrow(df))
+
+# let's add the full name to singleton collections
+quality(itemsets)$fullName <- ""
+if (encodeNames) {
+  for (i in 1:nrow(quality(itemsets))) 
+    if (quality(itemsets)[i, "noItems"] == 1)
+      quality(itemsets)[i, "fullName"] <- as.character(dfColEncodings[dfColEncodings$code ==
+                    substr(res[i, "items"], 2, nchar(as.character(res[i, "items"])) - 1), "names"])
+}
+
+inspect(itemsets)
+```
+
+
+
+## Building graphs
+
+We will now build graphs using three different algorithms - Kruskal, TD strategy, BU strategy.
+
+```{r Kruskal}
+graphKruskal <- msTreeKruskalCustom(itemsets)
+#graphKruskalRestricted <- msTreeKruskalCustom(itemsets, root = "{C,D}")
+```
+
+```{r stratTU}
+graphTDstrategy <- treeTDstrategy(itemsets)
+```
+
+```{r stratBU}
+graphBUstrategy <- treeBUstrategy(itemsets, verbose = T)
+  
+```
+
+## Visualizing graphs
+
+```{r}
+g <- graphKruskal
+layo <- create_layout(g, layout = 'tree', root = 2)
+ggraph(layo) + geom_edge_arc(aes(label = weight), colour = "grey", curvature = 0.25) + 
+ # geom_node_circle(aes(r = 0.5), fill = "white") + 
+  geom_node_text(aes(label = name)) + 
+  geom_node_text(aes(label = fullName), colour = "blue", nudge_y = -0.5) +
+  theme(axis.line=element_blank(),
+      axis.text.x=element_blank(),
+      axis.text.y=element_blank(),
+      axis.ticks=element_blank(),
+      axis.title.x=element_blank(),
+      axis.title.y=element_blank()) 
+```
+
+
+```{r}
+g <- graphKruskal
+V(g)$hasFullName <- V(g)$fullName == ""
+ggraph(g, layout = 'lgl') +  
+  geom_edge_arc(aes(label = weight), colour = "grey", curvature = 0.25, 
+                arrow = arrow(angle = 30, length = unit(0.125, "inches"), type = "closed")) +  
+     geom_node_circle(aes(r = 2.5 * support, fill = as.factor(hasFullName)), size = 0.1, alpha = 0.75) + 
+     scale_fill_manual(values=c("#FFFFFF", "#CCEECC"), guide=FALSE) +
+  geom_node_text(aes(label = name)) +
+  geom_node_text(aes(label = fullName), colour = "blue", nudge_y = -2.5) + theme(axis.line=element_blank(),
+      axis.text.x=element_blank(),
+      axis.text.y=element_blank(),
+      axis.ticks=element_blank(),
+      axis.title.x=element_blank(),
+      axis.title.y=element_blank()) 
+ggsave("grafo.png", height = 10, width = 14)
+```
+
+
+
+
+## Top-down strategy graph 
+
+```{r}
+g <- graphTDstrategy
+
+layo <- create_layout(g, layout = 'kk')
+
+#creating custom layout
+# only for comp.df and supp 0.8
+if (length(V(g)) == 11) {
+  layo$x <- c(20, 10, 52, 82, 5, 15, 60, 30, 45, 75, 90)
+  layo$x <- layo$x / 3
+  layo$y <- c(50, 40, 40, 40, 20, 27, 20, 20, 27, 27, 20)
+}
+
+ggraph(layo) + geom_edge_arc(colour = "grey", curvature = 0.025) + 
+    #geom_node_circle(aes(r = 2.5), fill = "white") + 
+    geom_node_text(aes(label = name)) + 
+    geom_node_text(aes(label = fullName), colour = "blue", nudge_y = -3.5) +
+    theme(axis.line=element_blank(),
+        axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank()) 
+```
+
+
+```{r}
+ggraph(g) +  geom_edge_arc(colour = "grey", curvature = 0.25) +  
+    geom_node_circle(aes(r = 0.3), fill = "white") + geom_node_text(aes(label = name)) +
+  geom_node_text(aes(label = fullName), colour = "blue", nudge_y = -0.5) + theme(axis.line=element_blank(),
+      axis.text.x=element_blank(),
+      axis.text.y=element_blank(),
+      axis.ticks=element_blank(),
+      axis.title.x=element_blank(),
+      axis.title.y=element_blank()) 
+```
+
+## Bottom-up strategy graph
+
+```{r}
+g <- graphBUstrategy
+
+ggraph(g) +  geom_edge_arc(colour = "grey", curvature = 0.25) +  
+    geom_node_circle(aes(r = 0.3), fill = "white") + geom_node_text(aes(label = name)) +
+  geom_node_text(aes(label = fullName), colour = "blue", nudge_y = -0.5) + theme(axis.line=element_blank(),
+      axis.text.x=element_blank(),
+      axis.text.y=element_blank(),
+      axis.ticks=element_blank(),
+      axis.title.x=element_blank(),
+      axis.title.y=element_blank()) 
+```
